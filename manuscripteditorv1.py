@@ -9,6 +9,12 @@ from docx import Document
 st.set_page_config(page_title="AI Manuscript Editor", layout="wide")
 st.title("✍️ AI Manuscript Editor")
 
+# Initialize session state for conversation history
+if "conversation_history" not in st.session_state:
+    st.session_state.conversation_history = {}
+if "feedback_generated" not in st.session_state:
+    st.session_state.feedback_generated = False
+
 # Instructions dropdown that remains persistent
 with st.expander("📖 How to Use This App & Get API Keys", expanded=False):
     st.markdown("""
@@ -21,14 +27,15 @@ with st.expander("📖 How to Use This App & Get API Keys", expanded=False):
     5. **Input your manuscript** by pasting text or uploading a .txt file
     6. **Write your feedback request** (e.g., "Is the dialogue realistic?", "Does the opening hook the reader?")
     7. **Click "Get Feedback"** to receive AI-powered editorial feedback
-    8. **Download results** as a Word document for easy sharing and reference
+    8. **Continue the conversation** with follow-up questions to any model
+    9. **Download results** as a Word document for easy sharing and reference
     
     ### 🔑 Where to Get API Keys
     
     **OpenAI API Key** (for GPT models):
     - Sign up at: https://platform.openai.com/
     - Go to API Keys section and create a new key
-    - Models available: GPT-4o, o3, GPT-4.1
+    - Models available: GPT-4o, GPT-4.1
     
     **Anthropic API Key** (for Claude models):
     - Sign up at: https://console.anthropic.com/
@@ -40,6 +47,7 @@ with st.expander("📖 How to Use This App & Get API Keys", expanded=False):
     - **Be specific** in your feedback requests (e.g., "Focus on character development in chapter 3")
     - **Provide context** about your genre, target audience, or specific concerns
     - **Use multiple models** to get diverse perspectives on your work
+    - **Continue conversations** with follow-up questions for deeper insights
     - **Try different editor personas** to match your writing style or genre needs
     - **Submit manageable chunks** (1-3 pages work best for detailed feedback)
     
@@ -50,6 +58,13 @@ with st.expander("📖 How to Use This App & Get API Keys", expanded=False):
     - "How is the pacing in this action sequence?"
     - "Are there any plot holes or inconsistencies in this scene?"
     - "Does this character's motivation feel authentic?"
+    
+    ### 💬 Example Follow-up Questions
+    
+    - "Can you give me specific examples of how to improve the dialogue?"
+    - "What are some alternative ways to start this chapter?"
+    - "How would you rewrite this paragraph to improve the pacing?"
+    - "Can you elaborate on the character development issues you mentioned?"
     """)
 
 # API key inputs
@@ -87,7 +102,7 @@ if st.session_state.anthropic_api_key:
     anthropic_client = anthropic.Anthropic(api_key=st.session_state.anthropic_api_key)
 
 # Choose models
-openai_models = ["gpt-4o", "o3", "gpt-4.1"]
+openai_models = ["gpt-4o", "gpt-4.1"]
 anthropic_models = ["claude-sonnet-4-20250514"]
 
 available_models = []
@@ -147,98 +162,220 @@ editor_prompt = st.text_area(
     help="Be specific about what aspects you want feedback on for the most helpful results."
 )
 
-# Run feedback
+# Function to get AI response
+def get_ai_response(model, messages, system_prompt):
+    try:
+        if model in openai_models:
+            response = openai_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+                temperature=0.7
+            )
+            return response.choices[0].message.content.strip()
+        elif model in anthropic_models:
+            # Convert messages for Anthropic format
+            anthropic_messages = []
+            for msg in messages:
+                if msg["role"] != "system":
+                    anthropic_messages.append(msg)
+            
+            response = anthropic_client.messages.create(
+                model=model,
+                max_tokens=4096,
+                temperature=0.7,
+                system=system_prompt,
+                messages=anthropic_messages
+            )
+            return response.content[0].text.strip()
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+# Run initial feedback
 st.subheader("🚀 Generate Feedback")
 run_button = st.button("📝 Get Editorial Feedback", type="primary")
-
-# Store results
-all_feedback = {}
 
 if run_button:
     if not manuscript_input or not editor_prompt:
         st.error("❌ Both manuscript text and feedback request are required.")
     else:
+        # Reset conversation history for new feedback session
+        st.session_state.conversation_history = {}
+        
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        system_prompt = f"You are a brilliant fiction editor named {editor_name}. Provide constructive, detailed feedback on the user's manuscript. Be specific, actionable, and encouraging while identifying areas for improvement."
+        initial_message = f"Manuscript:\n{manuscript_input}\n\nFeedback Request:\n{editor_prompt}"
         
         for i, model in enumerate(selected_models):
             status_text.text(f"Getting feedback from {model}...")
             progress_bar.progress((i) / len(selected_models))
             
-            try:
-                if model in openai_models:
-                    # Use OpenAI API
-                    response = openai_client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": f"You are a brilliant fiction editor named {editor_name}. Provide constructive, detailed feedback on the user's manuscript. Be specific, actionable, and encouraging while identifying areas for improvement."},
-                            {"role": "user", "content": f"Manuscript:\n{manuscript_input}\n\nFeedback Request:\n{editor_prompt}"}
-                        ],
-                        temperature=0.7
-                    )
-                    all_feedback[model] = response.choices[0].message.content.strip()
-                
-                elif model in anthropic_models:
-                    # Use Anthropic API
-                    response = anthropic_client.messages.create(
-                        model=model,
-                        max_tokens=4096,
-                        temperature=0.7,
-                        system=f"You are a brilliant fiction editor named {editor_name}. Provide constructive, detailed feedback on the user's manuscript. Be specific, actionable, and encouraging while identifying areas for improvement.",
-                        messages=[
-                            {"role": "user", "content": f"Manuscript:\n{manuscript_input}\n\nFeedback Request:\n{editor_prompt}"}
-                        ]
-                    )
-                    all_feedback[model] = response.content[0].text.strip()
+            # Initialize conversation history for each model
+            st.session_state.conversation_history[model] = {
+                "messages": [{"role": "user", "content": initial_message}],
+                "system_prompt": system_prompt
+            }
             
-            except Exception as e:
-                all_feedback[model] = f"❌ Error: {str(e)}"
+            response = get_ai_response(model, st.session_state.conversation_history[model]["messages"], system_prompt)
+            st.session_state.conversation_history[model]["messages"].append({"role": "assistant", "content": response})
         
         progress_bar.progress(1.0)
         status_text.text("✅ Feedback generation complete!")
+        st.session_state.feedback_generated = True
 
-# Show results
-if all_feedback:
-    st.subheader("📘 Editorial Feedback")
+# Show results and conversation interface
+if st.session_state.feedback_generated and st.session_state.conversation_history:
+    st.subheader("📘 Editorial Feedback & Conversation")
     
-    for model, feedback in all_feedback.items():
-        with st.expander(f"💡 Feedback from {model}", expanded=True):
-            if feedback.startswith("❌ Error:"):
-                st.error(feedback)
+    # Create tabs for each model
+    if len(selected_models) > 1:
+        tabs = st.tabs([f"💡 {model}" for model in selected_models])
+        
+        for i, model in enumerate(selected_models):
+            with tabs[i]:
+                # Display conversation history
+                for j, message in enumerate(st.session_state.conversation_history[model]["messages"]):
+                    if message["role"] == "user":
+                        if j == 0:  # First message is the original feedback request
+                            st.markdown("**📝 Your Original Request:**")
+                        else:
+                            st.markdown("**❓ Your Follow-up:**")
+                        st.markdown(f"*{message['content']}*")
+                    elif message["role"] == "assistant":
+                        if not message["content"].startswith("❌ Error:"):
+                            st.markdown("**🤖 Response:**")
+                            st.write(message["content"])
+                        else:
+                            st.error(message["content"])
+                    st.markdown("---")
+                
+                # Follow-up question input for this model
+                follow_up_key = f"follow_up_{model}"
+                follow_up = st.text_area(
+                    f"💬 Ask a follow-up question to {model}:",
+                    key=follow_up_key,
+                    placeholder="e.g., 'Can you give specific examples?', 'How would you rewrite this section?'",
+                    help="Continue the conversation with this model for deeper insights."
+                )
+                
+                if st.button(f"Send to {model}", key=f"send_{model}"):
+                    if follow_up.strip():
+                        with st.spinner(f"Getting response from {model}..."):
+                            # Add user's follow-up to conversation
+                            st.session_state.conversation_history[model]["messages"].append({"role": "user", "content": follow_up})
+                            
+                            # Get AI response
+                            response = get_ai_response(
+                                model, 
+                                st.session_state.conversation_history[model]["messages"], 
+                                st.session_state.conversation_history[model]["system_prompt"]
+                            )
+                            
+                            # Add AI response to conversation
+                            st.session_state.conversation_history[model]["messages"].append({"role": "assistant", "content": response})
+                        
+                        st.rerun()
+                    else:
+                        st.warning("Please enter a follow-up question.")
+    
+    else:
+        # Single model interface
+        model = selected_models[0]
+        st.markdown(f"### 💡 Conversation with {model}")
+        
+        # Display conversation history
+        for j, message in enumerate(st.session_state.conversation_history[model]["messages"]):
+            if message["role"] == "user":
+                if j == 0:  # First message is the original feedback request
+                    st.markdown("**📝 Your Original Request:**")
+                else:
+                    st.markdown("**❓ Your Follow-up:**")
+                st.markdown(f"*{message['content']}*")
+            elif message["role"] == "assistant":
+                if not message["content"].startswith("❌ Error:"):
+                    st.markdown("**🤖 Response:**")
+                    st.write(message["content"])
+                else:
+                    st.error(message["content"])
+            st.markdown("---")
+        
+        # Follow-up question input
+        follow_up = st.text_area(
+            f"💬 Ask a follow-up question to {model}:",
+            placeholder="e.g., 'Can you give specific examples?', 'How would you rewrite this section?'",
+            help="Continue the conversation with this model for deeper insights."
+        )
+        
+        if st.button(f"Send to {model}"):
+            if follow_up.strip():
+                with st.spinner(f"Getting response from {model}..."):
+                    # Add user's follow-up to conversation
+                    st.session_state.conversation_history[model]["messages"].append({"role": "user", "content": follow_up})
+                    
+                    # Get AI response
+                    response = get_ai_response(
+                        model, 
+                        st.session_state.conversation_history[model]["messages"], 
+                        st.session_state.conversation_history[model]["system_prompt"]
+                    )
+                    
+                    # Add AI response to conversation
+                    st.session_state.conversation_history[model]["messages"].append({"role": "assistant", "content": response})
+                
+                st.rerun()
             else:
-                st.write(feedback)
+                st.warning("Please enter a follow-up question.")
     
-    # Generate DOCX file
+    # Download functionality
+    st.subheader("📥 Export Conversation")
+    
+    # Generate DOCX file with full conversation
     doc = Document()
-    doc.add_heading('AI Manuscript Editor Feedback', 0)
+    doc.add_heading('AI Manuscript Editor - Full Conversation', 0)
     doc.add_paragraph(f'Editor Persona: {editor_name}')
-    doc.add_paragraph(f'Feedback Request: {editor_prompt}')
+    doc.add_paragraph(f'Original Feedback Request: {editor_prompt}')
     doc.add_paragraph('')
     doc.add_heading('Original Manuscript Excerpt', level=1)
     doc.add_paragraph(manuscript_input)
     doc.add_paragraph('')
     
-    for model, feedback in all_feedback.items():
-        if not feedback.startswith("❌ Error:"):
-            doc.add_heading(f'Feedback from {model}', level=1)
-            doc.add_paragraph(feedback)
-            doc.add_paragraph('')
+    for model in selected_models:
+        if model in st.session_state.conversation_history:
+            doc.add_heading(f'Conversation with {model}', level=1)
+            
+            for j, message in enumerate(st.session_state.conversation_history[model]["messages"]):
+                if message["role"] == "user":
+                    if j == 0:
+                        doc.add_heading('Original Request', level=2)
+                    else:
+                        doc.add_heading('Follow-up Question', level=2)
+                    doc.add_paragraph(message["content"])
+                elif message["role"] == "assistant" and not message["content"].startswith("❌ Error:"):
+                    doc.add_heading('Response', level=2)
+                    doc.add_paragraph(message["content"])
+                doc.add_paragraph('')
     
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     
-    col1, col2 = st.columns([1, 3])
+    col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
         st.download_button(
-            label="📥 Download as Word Doc",
+            label="📥 Download Full Conversation",
             data=buffer,
-            file_name="manuscript_feedback.docx",
+            file_name="manuscript_conversation.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             type="primary"
         )
     with col2:
-        st.success("✨ Feedback ready! Download the Word document to save your results.")
+        if st.button("🔄 Start New Session", type="secondary"):
+            st.session_state.conversation_history = {}
+            st.session_state.feedback_generated = False
+            st.rerun()
+    with col3:
+        st.success("✨ Continue chatting with your AI editors or download the full conversation!")
 
 # Footer
 st.markdown("---")
